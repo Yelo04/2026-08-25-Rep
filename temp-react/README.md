@@ -1,3 +1,15 @@
+처음에 파일 받으면 
+1. npm install
+2. .env 파일 만들기 ( 필수 )
+    .env.example 복사한 뒤에 파일 만들고 
+    일단 임시 비밀번호 넣어두기 (하고 싶은 거로 하세용)
+3. npm start 
+ㄱㄱ
+
+
+
+
+
 # Getting Started with Create React App
 
 This project was bootstrapped with [Create React App](https://github.com/facebook/create-react-app).
