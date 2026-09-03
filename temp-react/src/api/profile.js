@@ -37,3 +37,11 @@ export function fetchMyStats() {
 export function deleteAccount() {
   return apiFetch("/api/users/me", { method: "DELETE" });
 }
+
+// 회원가입 완료 (카카오 로그인 후 최초 1회 — 역할 선택 + 기본 정보)
+// POST /api/users/me/signup
+// body: { role: "user" | "provider", name, phone }
+// response: { name, phone, role }
+export function completeSignup({ role, name, phone }) {
+  return apiFetch("/api/users/me/signup", { method: "POST", body: { role, name, phone } });
+}

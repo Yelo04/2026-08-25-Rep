@@ -11,7 +11,9 @@ export function applyLunchbox({ storeId, registrationId, pickupTime }) {
 
 // 내 신청 내역
 // GET /api/applications/me
-// response: [{ id, storeName, date, time, status }]  status: "수령완료" | "취소됨" | "수령대기" 등
+// response: [{ id, store, date, time, status, pickupCode }]
+//   status: "수령대기" | "수락됨" | "수령완료" | "취소됨"
+//   pickupCode: 현장 QR 수령에 쓰이는 코드값(수락된 신청에만 존재) — 신청 내역 화면에서 QR로 표시됩니다.
 export function fetchMyApplications() {
   return apiFetch("/api/applications/me");
 }

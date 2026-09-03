@@ -41,3 +41,30 @@ export function respondToApplicant(registrationId, applicationId, decision) {
     body: { decision },
   });
 }
+
+// 현장 QR/코드로 수령 확인 (제공자가 수락된 신청자의 픽업을 확정할 때 사용)
+// POST /api/food-registrations/:registrationId/applicants/:applicationId/verify-pickup
+// body: { code } — 사용자 신청 내역 화면에 뜬 QR/코드 값
+export function verifyPickup(registrationId, applicationId, code) {
+  return apiFetch(`/api/food-registrations/${registrationId}/applicants/${applicationId}/verify-pickup`, {
+    method: "POST",
+    body: { code },
+  });
+}
+
+// 등록건 상세 (수정 화면에서 기존 값을 불러올 때 사용)
+// GET /api/food-registrations/:registrationId
+// response: { id, storeId, menuItems, allergyItems, quantity, photoUrl }
+export function fetchRegistrationDetail(registrationId) {
+  return apiFetch(`/api/food-registrations/${registrationId}`);
+}
+
+// 등록한 식품 정보 수정
+// PATCH /api/food-registrations/:registrationId
+// body: { menuItems, allergyItems, quantity }
+export function updateRegistration(registrationId, { menuItems, quantity, allergyItems }) {
+  return apiFetch(`/api/food-registrations/${registrationId}`, {
+    method: "PATCH",
+    body: { menuItems, quantity, allergyItems },
+  });
+}

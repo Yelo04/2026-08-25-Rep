@@ -1,22 +1,34 @@
 import "./App.css";
 import React, { useState, useEffect, useMemo, useRef } from "react";
+import { QRCodeSVG } from "qrcode.react";
 import logoImg from "./assets/logo.png";
 import kakaologoImg from "./assets/kakao_logo.png";
 import { loadKakaoMaps } from "./lib/kakaoMap";
+import { distanceKm, formatDistance } from "./lib/geo";
 import { fetchStores, fetchLunchbox, fetchMyStores } from "./api/stores";
-import { applyLunchbox, fetchMyApplications } from "./api/applications";
+import { applyLunchbox, fetchMyApplications, cancelApplication } from "./api/applications";
 import {
   registerFood,
   fetchMyRegistrations,
   fetchRegistrationApplicants,
   respondToApplicant,
+  verifyPickup,
+  fetchRegistrationDetail,
+  updateRegistration,
 } from "./api/registrations";
-import { fetchMyProfile, updateMyProfile, uploadAvatar, fetchMyStats, deleteAccount } from "./api/profile";
+import {
+  fetchMyProfile,
+  updateMyProfile,
+  uploadAvatar,
+  fetchMyStats,
+  deleteAccount,
+  completeSignup,
+} from "./api/profile";
 import { fetchFavorites, addFavorite, removeFavorite } from "./api/favorites";
 import { fetchNotificationSettings, updateNotificationSettings } from "./api/notifications";
 import { fetchMyVerification, submitVerification, cancelVerification } from "./api/verification";
 import { submitInquiry } from "./api/support";
-import { logout as clearAuthToken } from "./api/auth";
+import { loginWithKakao, getKakaoAuthUrl, isKakaoLoginConfigured, logout as clearAuthToken } from "./api/auth";
 import { getAdminToken } from "./api/adminClient";
 import { adminLogin, adminLogout, fetchPendingVerifications, respondToVerification } from "./api/adminVerifications";
 
@@ -222,6 +234,35 @@ function MapArea({ stores, loading, error, onSelectStore }) {
   );
 }
 
+// 목록형 매장 리스트 (지도 대신 텍스트/카드 형태로 조회) — 거리순 정렬 시 거리도 함께 표시
+function StoreListView({ stores, loading, error, onSelectStore }) {
+  return (
+    <div className="store-list">
+      {loading && <p className="empty-state">매장 정보를 불러오는 중...</p>}
+      {!loading && error && <p className="empty-state">{error}</p>}
+      {!loading && !error && stores.length === 0 && <p className="empty-state">검색 결과가 없어요.</p>}
+      {!loading &&
+        !error &&
+        stores.map((s) => (
+          <div className="store-list__item" key={s.id} onClick={() => onSelectStore(s)}>
+            <div
+              className="store-list__photo"
+              style={s.photoUrl ? { backgroundImage: `url(${s.photoUrl})` } : undefined}
+            >
+              {!s.photoUrl && <PinBadge />}
+            </div>
+            <div className="store-list__info">
+              <div className="store-list__name">{s.name}</div>
+              <div className="store-list__meta">🕒 {s.hours}</div>
+              <div className="store-list__meta">📍 {s.address}</div>
+            </div>
+            {s._distanceKm != null && <span className="store-list__distance">{formatDistance(s._distanceKm)}</span>}
+          </div>
+        ))}
+    </div>
+  );
+}
+
 /*────────────────── 화면: 홈 (메뉴바) ─────────────────────────*/
 
 function HomeScreen({
@@ -235,30 +276,96 @@ function HomeScreen({
   storesError,
   onSelectStore,
 }) {
-  // "지역, 제공처명" 검색어로 매장 목록을 클라이언트에서 필터링합니다.
+  const [viewMode, setViewMode] = useState("map"); // "map" | "list"
+  const [userLocation, setUserLocation] = useState(null);
+  const [locationHint, setLocationHint] = useState(null);
+
+  // 거리기반 추천을 위해 사용자 위치를 한 번 요청합니다. 거부해도 앱은 그대로 동작합니다.
+  useEffect(() => {
+    if (!navigator.geolocation) {
+      setLocationHint("이 브라우저는 위치 정보를 지원하지 않아요.");
+      return;
+    }
+    navigator.geolocation.getCurrentPosition(
+      (pos) => setUserLocation({ lat: pos.coords.latitude, lng: pos.coords.longitude }),
+      () => setLocationHint("위치 권한을 허용하면 가까운 매장순으로 볼 수 있어요."),
+      { enableHighAccuracy: false, timeout: 8000 }
+    );
+  }, []);
+
+  // "지역, 제공처명" 검색어로 필터링 + 위치 정보가 있으면 거리 계산 후 가까운 순 정렬
   const filteredStores = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return stores;
-    return stores.filter(
-      (s) => (s.name || "").toLowerCase().includes(q) || (s.address || "").toLowerCase().includes(q)
-    );
-  }, [stores, query]);
+    let list = stores;
+    if (q) {
+      list = list.filter(
+        (s) => (s.name || "").toLowerCase().includes(q) || (s.address || "").toLowerCase().includes(q)
+      );
+    }
+    if (userLocation) {
+      list = list
+        .map((s) => ({ ...s, _distanceKm: distanceKm(userLocation.lat, userLocation.lng, s.lat, s.lng) }))
+        .sort((a, b) => (a._distanceKm ?? Infinity) - (b._distanceKm ?? Infinity));
+    }
+    return list;
+  }, [stores, query, userLocation]);
 
   return (
     <div className="home-screen">
       <Header onNavigate={onNavigate} active="home" verified={verified} avatarUrl={avatarUrl} />
       <SearchBar value={query} onChange={setQuery} />
-      <div className="home-screen__map-wrap">
-        <MapArea stores={filteredStores} loading={storesLoading} error={storesError} onSelectStore={onSelectStore} />
+
+      <div className="home-screen__toolbar">
+        <div className="view-toggle">
+          <button
+            type="button"
+            className={"view-toggle__btn" + (viewMode === "map" ? " view-toggle__btn--active" : "")}
+            onClick={() => setViewMode("map")}
+          >
+            🗺️ 지도
+          </button>
+          <button
+            type="button"
+            className={"view-toggle__btn" + (viewMode === "list" ? " view-toggle__btn--active" : "")}
+            onClick={() => setViewMode("list")}
+          >
+            📋 목록{userLocation ? " (가까운순)" : ""}
+          </button>
+        </div>
+        {locationHint && <span className="home-screen__location-hint">{locationHint}</span>}
       </div>
+
+      {viewMode === "map" ? (
+        <div className="home-screen__map-wrap">
+          <MapArea stores={filteredStores} loading={storesLoading} error={storesError} onSelectStore={onSelectStore} />
+        </div>
+      ) : (
+        <div className="home-screen__list-wrap">
+          <StoreListView
+            stores={filteredStores}
+            loading={storesLoading}
+            error={storesError}
+            onSelectStore={onSelectStore}
+          />
+        </div>
+      )}
     </div>
   );
 }
 
 /*────────────────── 로그인 화면 ─────────────────────────*/
 
-// 여기 onNavigate를 props로 받도록 추가함 (전에는 괄호 안이 비어있었음)
+// 카카오 로그인 버튼 — REACT_APP_KAKAO_CLIENT_ID가 설정되어 있으면 실제 카카오 인가 화면으로
+// 이동하고, 없으면(백엔드/카카오 앱 준비 전 개발 중) 바로 홈으로 이동하는 임시 동작을 유지합니다.
 function LoginScreen({ onNavigate }) {
+  const handleKakaoLogin = () => {
+    if (isKakaoLoginConfigured()) {
+      window.location.href = getKakaoAuthUrl();
+    } else {
+      onNavigate("home");
+    }
+  };
+
   return (
     <div className="login-screen">
       {/* 배경 사진 */}
@@ -271,8 +378,7 @@ function LoginScreen({ onNavigate }) {
         <Logo size={48} />
 
         <div className="login-screen__actions">
-          {/* 여기 onClick 추가함 (전에는 아예 없었음) */}
-          <button className="btn btn--kakao btn--full" onClick={() => onNavigate("home")}>
+          <button className="btn btn--kakao btn--full" onClick={handleKakaoLogin}>
             <img src={kakaologoImg} alt="" className="btn--kakao__icon" /> 카카오 로그인
           </button>
           <p className="login-screen__footnote">
@@ -282,6 +388,94 @@ function LoginScreen({ onNavigate }) {
             관리자이신가요?
           </button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/*────────────────── 화면: 회원가입 (카카오 로그인 최초 1회) ─────────────────*/
+/* 일반 사용자 / 제공자 역할을 나눠서 가입받습니다. 제공자를 선택하면 가입 완료 후
+   바로 소속 인증(VerifyScreen) 화면으로 이어집니다. */
+
+function SignupScreen({ onNavigate, onComplete }) {
+  const [role, setRole] = useState(null); // "user" | "provider"
+  const [name, setName] = useState("");
+  const [phone, setPhone] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  const canSubmit = !!role && name.trim() !== "" && !submitting;
+
+  const handleSubmit = async () => {
+    if (!canSubmit) return;
+    setSubmitting(true);
+    try {
+      await onComplete({ role, name: name.trim(), phone: phone.trim() });
+      onNavigate(role === "provider" ? "verify" : "home");
+    } catch (err) {
+      alert(err.message || "회원가입에 실패했습니다.");
+    } finally {
+      setSubmitting(false);
+    }
+  };
+
+  return (
+    <div className="signup-screen">
+      <div className="signup-screen__body">
+        <Logo size={32} />
+        <div className="signup-screen__title">환영해요! 어떻게 이용하실 건가요?</div>
+
+        <div className="signup-role-grid">
+          <button
+            type="button"
+            className={"signup-role" + (role === "user" ? " signup-role--active" : "")}
+            onClick={() => setRole("user")}
+          >
+            <span className="signup-role__icon">🙋</span>
+            <span className="signup-role__label">일반 사용자</span>
+            <span className="signup-role__desc">도시락을 신청하고 받을래요</span>
+          </button>
+          <button
+            type="button"
+            className={"signup-role" + (role === "provider" ? " signup-role--active" : "")}
+            onClick={() => setRole("provider")}
+          >
+            <span className="signup-role__icon">🏪</span>
+            <span className="signup-role__label">제공자</span>
+            <span className="signup-role__desc">잉여 식품을 등록하고 나눠줄래요</span>
+          </button>
+        </div>
+
+        <label className="field-label" htmlFor="signup-name">
+          이름
+        </label>
+        <input
+          id="signup-name"
+          className="text-input"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder="이름을 입력하세요"
+        />
+
+        <label className="field-label" htmlFor="signup-phone">
+          전화번호
+        </label>
+        <input
+          id="signup-phone"
+          className="text-input"
+          value={phone}
+          onChange={(e) => setPhone(e.target.value)}
+          placeholder="전화번호를 입력하세요"
+        />
+      </div>
+
+      <div className="subpage__actions">
+        <button
+          className={"btn btn--primary btn--full" + (canSubmit ? "" : " btn--disabled")}
+          disabled={!canSubmit}
+          onClick={handleSubmit}
+        >
+          {submitting ? "가입 중..." : "시작하기"}
+        </button>
       </div>
     </div>
   );
@@ -1215,12 +1409,26 @@ function VerifyScreen({ onNavigate, verification, onVerify, onUnverify }) {
   );
 }
 
+// 예약 취소 가능 여부 — 이미 끝난 신청이거나, 수령 시간 30분 전 이내면 취소할 수 없습니다.
+function getCancelState(h) {
+  if (h.status === "취소됨" || h.status === "수령완료") return { can: false, reason: null };
+  if (!h.date || !h.time) return { can: true, reason: null };
+  const pickupAt = new Date(`${h.date}T${h.time}:00`);
+  if (Number.isNaN(pickupAt.getTime())) return { can: true, reason: null };
+  const diffMin = (pickupAt.getTime() - Date.now()) / 60000;
+  if (diffMin < 30) {
+    return { can: false, reason: "수령 30분 전부터는 취소할 수 없어요." };
+  }
+  return { can: true, reason: null };
+}
+
 /*────────────────── 화면: 신청 내역 ─────────────────*/
 
-function ApplicationsHistoryScreen({ onNavigate }) {
+function ApplicationsHistoryScreen({ onNavigate, onSelectApplication }) {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [cancelingId, setCancelingId] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -1239,6 +1447,19 @@ function ApplicationsHistoryScreen({ onNavigate }) {
     };
   }, []);
 
+  const handleCancel = async (h) => {
+    if (!window.confirm("신청을 취소하시겠어요?")) return;
+    setCancelingId(h.id);
+    try {
+      await cancelApplication(h.id);
+      setHistory((prev) => prev.map((item) => (item.id === h.id ? { ...item, status: "취소됨" } : item)));
+    } catch (err) {
+      alert(err.message || "취소에 실패했습니다.");
+    } finally {
+      setCancelingId(null);
+    }
+  };
+
   return (
     <div className="subpage">
       <SubPageHeader title="신청 내역" onBack={() => onNavigate("mypage")} />
@@ -1250,17 +1471,68 @@ function ApplicationsHistoryScreen({ onNavigate }) {
         )}
         {!loading &&
           !error &&
-          history.map((h) => (
-            <div className="history-card" key={h.id}>
-              <div className="history-card__top">
-                <span className="history-card__title">{h.store}</span>
-                <StatusBadge status={h.status} />
+          history.map((h) => {
+            const { can, reason } = getCancelState(h);
+            return (
+              <div className="history-card" key={h.id}>
+                <div className="history-card__top">
+                  <span className="history-card__title">{h.store}</span>
+                  <StatusBadge status={h.status} />
+                </div>
+                <div className="history-card__meta">
+                  {h.date} · 수령 {h.time}
+                </div>
+                {(h.status === "수락됨" || (h.status !== "취소됨" && h.status !== "수령완료")) && (
+                  <div className="history-card__actions">
+                    {h.status === "수락됨" && (
+                      <button className="btn-text" onClick={() => onSelectApplication(h)}>
+                        QR 코드 보기
+                      </button>
+                    )}
+                    <button
+                      className="btn-text btn-text--danger"
+                      disabled={!can || cancelingId === h.id}
+                      onClick={() => handleCancel(h)}
+                    >
+                      {cancelingId === h.id ? "취소 중..." : "신청 취소"}
+                    </button>
+                  </div>
+                )}
+                {!can && reason && <div className="history-card__hint">{reason}</div>}
               </div>
-              <div className="history-card__meta">
-                {h.date} · 수령 {h.time}
-              </div>
-            </div>
-          ))}
+            );
+          })}
+      </div>
+    </div>
+  );
+}
+
+/*────────────────── 화면: 수령 QR 코드 (신청 내역 항목 클릭 시) ─────────────────*/
+
+function ApplicationQRScreen({ onNavigate, application }) {
+  if (!application) {
+    return (
+      <div className="subpage">
+        <SubPageHeader title="수령 QR 코드" onBack={() => onNavigate("history-apply")} />
+        <div className="subpage__body">
+          <p className="empty-state">신청 내역에서 항목을 먼저 선택해주세요.</p>
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="subpage">
+      <SubPageHeader title="수령 QR 코드" onBack={() => onNavigate("history-apply")} />
+      <div className="subpage__body qr-screen__body">
+        <p className="qr-screen__desc">현장 직원에게 이 QR 코드를 보여주시면 수령 확인이 완료됩니다.</p>
+        <div className="qr-screen__code">
+          <QRCodeSVG value={application.pickupCode || String(application.id)} size={200} />
+        </div>
+        <div className="qr-screen__store">{application.store}</div>
+        <div className="qr-screen__meta">
+          {application.date} · 수령 {application.time}
+        </div>
       </div>
     </div>
   );
@@ -1268,7 +1540,7 @@ function ApplicationsHistoryScreen({ onNavigate }) {
 
 /*────────────────── 화면: 등록 내역 ─────────────────*/
 
-function RegistrationsHistoryScreen({ onNavigate, onSelectRegistration }) {
+function RegistrationsHistoryScreen({ onNavigate, onSelectRegistration, onEditRegistration }) {
   const [history, setHistory] = useState([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
@@ -1315,6 +1587,11 @@ function RegistrationsHistoryScreen({ onNavigate, onSelectRegistration }) {
                 {h.date} · 수량 {h.quantity}
                 {typeof h.applicantCount === "number" && ` · 신청 ${h.applicantCount}건`}
               </div>
+              <div className="history-card__actions" onClick={(e) => e.stopPropagation()}>
+                <button className="btn-text" onClick={() => onEditRegistration(h)}>
+                  정보 수정
+                </button>
+              </div>
               <span className="history-card__link">신청자 관리 ›</span>
             </div>
           ))}
@@ -1360,6 +1637,21 @@ function RegistrationApplicantsScreen({ onNavigate, registration }) {
       );
     } catch (err) {
       alert(err.message || "처리에 실패했습니다.");
+    } finally {
+      setRespondingId(null);
+    }
+  };
+
+  // 현장에서 신청자의 QR/코드를 확인해 수령을 완료 처리합니다.
+  const handleVerifyPickup = async (applicationId) => {
+    const code = window.prompt("고객이 보여준 QR 코드 값을 입력하거나, QR 스캐너로 스캔하세요.");
+    if (!code || !code.trim()) return;
+    setRespondingId(applicationId);
+    try {
+      await verifyPickup(registration.id, applicationId, code.trim());
+      setApplicants((prev) => prev.map((a) => (a.id === applicationId ? { ...a, status: "수령완료" } : a)));
+    } catch (err) {
+      alert(err.message || "수령 확인에 실패했습니다.");
     } finally {
       setRespondingId(null);
     }
@@ -1423,8 +1715,128 @@ function RegistrationApplicantsScreen({ onNavigate, registration }) {
                   </button>
                 </div>
               )}
+              {a.status === "수락됨" && (
+                <div className="applicant-card__actions">
+                  <button
+                    className="btn btn--primary"
+                    disabled={respondingId === a.id}
+                    onClick={() => handleVerifyPickup(a.id)}
+                  >
+                    {respondingId === a.id ? "처리 중..." : "📷 QR 수령 확인"}
+                  </button>
+                </div>
+              )}
             </div>
           ))}
+      </div>
+    </div>
+  );
+}
+
+/*────────────────── 화면: 식품 정보 수정 (등록 내역 항목의 "정보 수정") ─────────────────*/
+
+function EditRegistrationScreen({ onNavigate, registration, onSave }) {
+  const [menuItems, setMenuItems] = useState([]);
+  const [quantity, setQuantity] = useState("");
+  const [allergyItems, setAllergyItems] = useState([]);
+  const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState(null);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    if (!registration) return;
+    let cancelled = false;
+    fetchRegistrationDetail(registration.id)
+      .then((data) => {
+        if (cancelled || !data) return;
+        setMenuItems(data.menuItems || []);
+        setQuantity(data.quantity != null ? String(data.quantity) : "");
+        setAllergyItems(data.allergyItems || []);
+      })
+      .catch((err) => {
+        if (!cancelled) setLoadError(err.message);
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [registration]);
+
+  if (!registration) {
+    return (
+      <div className="subpage">
+        <SubPageHeader title="식품 정보 수정" onBack={() => onNavigate("history-register")} />
+        <div className="subpage__body">
+          <p className="empty-state">등록 내역에서 수정할 항목을 먼저 선택해주세요.</p>
+        </div>
+      </div>
+    );
+  }
+
+  const canSave = menuItems.length > 0 && quantity.trim() !== "" && !saving;
+
+  const handleSave = async () => {
+    if (!canSave) return;
+    setSaving(true);
+    try {
+      await onSave(registration.id, { menuItems, quantity, allergyItems });
+      alert("수정되었습니다.");
+      onNavigate("history-register");
+    } catch (err) {
+      alert(err.message || "수정에 실패했습니다.");
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <div className="subpage">
+      <SubPageHeader title="식품 정보 수정" onBack={() => onNavigate("history-register")} />
+      <div className="subpage__body">
+        {loading && <p className="empty-state">불러오는 중...</p>}
+        {!loading && loadError && <p className="empty-state">{loadError}</p>}
+        {!loading && !loadError && (
+          <>
+            <label className="section-label">■ 메뉴</label>
+            <TagInputGrid
+              tags={menuItems}
+              onAdd={(v) => setMenuItems((prev) => [...prev, v])}
+              onRemove={(i) => setMenuItems((prev) => prev.filter((_, idx) => idx !== i))}
+              placeholder="메뉴명을 입력하세요"
+            />
+
+            <label className="section-label">■ 수량</label>
+            <input
+              className="text-input"
+              value={quantity}
+              onChange={(e) => setQuantity(e.target.value)}
+              placeholder="예) 5개"
+            />
+
+            <label className="section-label">■ 알러지 식품</label>
+            <TagInputGrid
+              tags={allergyItems}
+              onAdd={(v) => setAllergyItems((prev) => [...prev, v])}
+              onRemove={(i) => setAllergyItems((prev) => prev.filter((_, idx) => idx !== i))}
+              placeholder="알러지 유발 식품을 입력하세요"
+            />
+          </>
+        )}
+      </div>
+
+      <div className="subpage__actions">
+        <button className="btn btn--outline" onClick={() => onNavigate("history-register")}>
+          취소
+        </button>
+        <button
+          className={"btn btn--primary" + (canSave ? "" : " btn--disabled")}
+          disabled={!canSave}
+          onClick={handleSave}
+        >
+          {saving ? "저장 중..." : "저장하기"}
+        </button>
       </div>
     </div>
   );
@@ -1664,8 +2076,28 @@ export default function App() {
   // 지도에서 선택한 매장 (도시락 신청 화면에서 사용)
   const [selectedStore, setSelectedStore] = useState(null);
 
-  // 등록 내역에서 선택한 등록건 (신청자 관리 화면에서 사용)
+  // 등록 내역에서 선택한 등록건 (신청자 관리 / 정보 수정 화면에서 사용)
   const [selectedRegistration, setSelectedRegistration] = useState(null);
+
+  // 신청 내역에서 선택한 신청건 (수령 QR 코드 화면에서 사용)
+  const [selectedApplication, setSelectedApplication] = useState(null);
+
+  // 카카오 로그인 후 돌아온 콜백(?code=...)을 처리합니다. 인가 코드를 백엔드로 보내
+  // 서비스 토큰을 받고, 최초 로그인이면 회원가입(역할 선택) 화면으로 보냅니다.
+  useEffect(() => {
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get("code");
+    if (!code) return;
+    window.history.replaceState({}, "", window.location.pathname);
+    loginWithKakao(code)
+      .then((data) => {
+        setPage(data && data.isNewUser ? "signup" : "home");
+      })
+      .catch((err) => {
+        alert(err.message || "로그인에 실패했습니다.");
+      });
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // 로그인 직후 1회, 내 정보(프로필/인증상태/통계/찜/알림설정)를 백엔드에서 불러옵니다.
   const bootstrappedRef = useRef(false);
@@ -1737,6 +2169,26 @@ export default function App() {
   const handleSelectRegistration = (registration) => {
     setSelectedRegistration(registration);
     setPage("registration-applicants");
+  };
+
+  const handleEditRegistration = (registration) => {
+    setSelectedRegistration(registration);
+    setPage("edit-registration");
+  };
+
+  const handleSaveRegistrationEdit = async (registrationId, payload) => {
+    await updateRegistration(registrationId, payload);
+  };
+
+  const handleSelectApplication = (application) => {
+    setSelectedApplication(application);
+    setPage("application-qr");
+  };
+
+  // 회원가입 완료 (역할 선택 + 기본 정보) — 제공자를 선택했으면 이어서 소속 인증으로 안내합니다.
+  const handleCompleteSignup = async ({ role, name, phone }) => {
+    await completeSignup({ role, name, phone });
+    setProfile((p) => ({ ...p, name, phone }));
   };
 
   const handleToggleNotif = async (key, value) => {
@@ -1827,11 +2279,13 @@ export default function App() {
     setStats(EMPTY_STATS);
     setSelectedStore(null);
     setSelectedRegistration(null);
+    setSelectedApplication(null);
     setPage("login");
   };
 
   const screens = {
     login: <LoginScreen onNavigate={setPage} />,
+    signup: <SignupScreen onNavigate={setPage} onComplete={handleCompleteSignup} />,
     home: (
       <HomeScreen
         onNavigate={setPage}
@@ -1874,12 +2328,26 @@ export default function App() {
         onUnverify={handleUnverify}
       />
     ),
-    "history-apply": <ApplicationsHistoryScreen onNavigate={setPage} />,
+    "history-apply": (
+      <ApplicationsHistoryScreen onNavigate={setPage} onSelectApplication={handleSelectApplication} />
+    ),
+    "application-qr": <ApplicationQRScreen onNavigate={setPage} application={selectedApplication} />,
     "history-register": (
-      <RegistrationsHistoryScreen onNavigate={setPage} onSelectRegistration={handleSelectRegistration} />
+      <RegistrationsHistoryScreen
+        onNavigate={setPage}
+        onSelectRegistration={handleSelectRegistration}
+        onEditRegistration={handleEditRegistration}
+      />
     ),
     "registration-applicants": (
       <RegistrationApplicantsScreen onNavigate={setPage} registration={selectedRegistration} />
+    ),
+    "edit-registration": (
+      <EditRegistrationScreen
+        onNavigate={setPage}
+        registration={selectedRegistration}
+        onSave={handleSaveRegistrationEdit}
+      />
     ),
     favorites: (
       <FavoritesScreen onNavigate={setPage} favorites={favorites} onRemoveFavorite={handleRemoveFavorite} />
