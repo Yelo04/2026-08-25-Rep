@@ -19,26 +19,52 @@
   box-sizing: border-box;
 }
 
+/* 브라우저 기본 body 여백을 지워서, 뷰포트 크기와 무관하게 항상 딱 맞도록 합니다.
+   (이 리셋이 없으면 기본 8px 여백 때문에 기종에 따라 스크롤이 생길 수 있음) */
+html,
+body {
+  margin: 0;
+  padding: 0;
+  overflow-x: hidden;
+}
+
 /* ──────────────────  앱 뼈대  ───────────────── */
 
 .app-shell {
-  min-height: 100vh;
+  height: 100dvh;
   background: #EDEAE2;
   display: flex;
   align-items: center;
   justify-content: center;
   font-family: "Apple SD Gothic Neo", "Malgun Gothic", "Noto Sans KR", sans-serif;
-  padding: 24px 0;
+  overflow: hidden;
 }
 
 .app-frame {
   width: 390px;
   height: 780px;
+  max-width: 100vw;
+  max-height: 100dvh;
   background: var(--color-cream);
   border-radius: 28px;
   overflow: hidden;
   box-shadow: 0 20px 60px rgba(0, 0, 0, 0.25);
   position: relative;
+}
+
+/* 뷰포트가 휴대폰 프레임(390×780)보다 작으면, 카드 목업 대신 화면을 꽉 채우는
+   실제 앱처럼 보이도록 전환합니다 — 이러면 어떤 기종에서도 잘리거나 스크롤이 생기지 않습니다. */
+@media (max-width: 430px), (max-height: 820px) {
+  .app-shell {
+    padding: 0;
+  }
+
+  .app-frame {
+    width: 100vw;
+    height: 100dvh;
+    border-radius: 0;
+    box-shadow: none;
+  }
 }
 
 /* ─────────────────  로고  ───────────────── */
